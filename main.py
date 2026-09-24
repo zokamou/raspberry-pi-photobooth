@@ -9,11 +9,16 @@ os.environ.setdefault("SDL_VIDEODRIVER", "wayland")
 import pygame
 from picamera2 import Picamera2
 from libcamera import Transform
+from PIL import Image, ImageEnhance
+from escpos.printer import File as EscposFile
 
 
 SCREEN_W, SCREEN_H = 800, 480
 CAMERA_RES = (800, 480)
 CAPTURE_RES = (1920, 1080)
+
+PRINTER_DEVICE = "/dev/usb/lp0"
+PRINTER_WIDTH_PX = 384
 
 COUNTDOWN_SECONDS = 5
 PRINTING_MESSAGE_SECONDS = 2
@@ -38,9 +43,70 @@ POWER_BUTTON_RECT = pygame.Rect(
 POWER_HOLD_SECONDS = 3
 
 
-def draw_centered_text(screen, text, font, y, color=(255, 255, 255)):
+def print_photo(image_path):
+    printer = EscposFile(PRINTER_DEVICE)
+
+    try:
+        image = Image.open(image_path)
+
+        # Center-crop to square
+        size = min(image.width, image.height)
+        left = (image.width - size) // 2
+        top = (image.height - size) // 2
+
+        image = image.crop(
+            (
+                left,
+                top,
+                left + size,
+                top + size,
+            )
+        )
+
+        # Resize to printer width
+        image = image.resize(
+            (PRINTER_WIDTH_PX, PRINTER_WIDTH_PX),
+            Image.LANCZOS,
+        )
+
+        # Convert to grayscale
+        image = image.convert("L")
+
+        # Increase contrast slightly for thermal printing
+        image = ImageEnhance.Contrast(image).enhance(1.4)
+
+        # Convert to 1-bit black and white with dithering
+        image = image.convert("1")
+
+        printer.image(
+            image,
+            impl="bitImageRaster",
+        )
+
+        # Feed some paper after image
+        printer.text("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n")
+
+        # Try standard ESC/POS cut
+        try:
+            printer.cut()
+        except Exception as error:
+            print(f"Cutter error: {error}")
+
+    finally:
+        printer.close()
+
+
+def draw_centered_text(
+    screen,
+    text,
+    font,
+    y,
+    color=(255, 255, 255),
+):
     label = font.render(text, True, color)
-    rect = label.get_rect(center=(SCREEN_W // 2, y))
+    rect = label.get_rect(
+        center=(SCREEN_W // 2, y)
+    )
     screen.blit(label, rect)
 
 
@@ -55,7 +121,10 @@ def frame_to_surface(frame):
     )
 
 
-def draw_power_button(screen, font, hold_progress=0):
+def draw_power_button(
+    screen,
+    hold_progress=0,
+):
     pygame.draw.circle(
         screen,
         (255, 255, 255),
@@ -91,7 +160,12 @@ def draw_power_button(screen, font, hold_progress=0):
 
 def shutdown_pi():
     subprocess.run(
-        ["sudo", "/sbin/shutdown", "-h", "now"]
+        [
+            "sudo",
+            "/sbin/shutdown",
+            "-h",
+            "now",
+        ]
     )
 
 
@@ -100,14 +174,22 @@ def capture_photo(
     preview_config,
     camera_transform,
 ):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    photo_path = PHOTOS_DIR / f"photo_{timestamp}.jpg"
+    timestamp = datetime.now().strftime(
+        "%Y%m%d_%H%M%S"
+    )
 
-    capture_config = picam2.create_still_configuration(
-        main={
-            "size": CAPTURE_RES,
-        },
-        transform=camera_transform,
+    photo_path = (
+        PHOTOS_DIR
+        / f"photo_{timestamp}.jpg"
+    )
+
+    capture_config = (
+        picam2.create_still_configuration(
+            main={
+                "size": CAPTURE_RES,
+            },
+            transform=camera_transform,
+        )
     )
 
     picam2.switch_mode_and_capture_file(
@@ -123,25 +205,35 @@ def capture_photo(
 
 
 def main():
-    PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+    PHOTOS_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
+    # Camera
     picam2 = Picamera2()
 
     camera_transform = Transform(
         hflip=True,
     )
 
-    preview_config = picam2.create_preview_configuration(
-        main={
-            "size": CAMERA_RES,
-            "format": "RGB888",
-        },
-        transform=camera_transform,
+    preview_config = (
+        picam2.create_preview_configuration(
+            main={
+                "size": CAMERA_RES,
+                "format": "RGB888",
+            },
+            transform=camera_transform,
+        )
     )
 
-    picam2.configure(preview_config)
+    picam2.configure(
+        preview_config
+    )
+
     picam2.start()
 
+    # Pygame
     pygame.init()
 
     screen = pygame.display.set_mode(
@@ -149,23 +241,38 @@ def main():
         pygame.FULLSCREEN | pygame.NOFRAME,
     )
 
-    pygame.display.set_caption("Thermal Photobooth")
+    pygame.display.set_caption(
+        "Thermal Photobooth"
+    )
+
     pygame.mouse.set_visible(False)
 
+    # Home image
     home_image = pygame.image.load(
         str(HOME_IMAGE)
     ).convert()
 
-    if home_image.get_size() != (SCREEN_W, SCREEN_H):
+    if home_image.get_size() != (
+        SCREEN_W,
+        SCREEN_H,
+    ):
         home_image = pygame.transform.scale(
             home_image,
             (SCREEN_W, SCREEN_H),
         )
 
-    countdown_font = pygame.font.Font(None, 160)
-    status_font = pygame.font.Font(None, 64)
-    power_font = pygame.font.Font(None, 24)
+    # Fonts
+    countdown_font = pygame.font.Font(
+        None,
+        160,
+    )
 
+    status_font = pygame.font.Font(
+        None,
+        64,
+    )
+
+    # State
     state = STATE_WELCOME
     state_start = time.time()
 
@@ -176,7 +283,6 @@ def main():
 
     while running:
         now = time.time()
-        elapsed = now - state_start
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -191,16 +297,24 @@ def main():
 
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if state == STATE_WELCOME:
-                    if POWER_BUTTON_RECT.collidepoint(event.pos):
+                    if POWER_BUTTON_RECT.collidepoint(
+                        event.pos
+                    ):
                         power_press_start = now
                     else:
                         state = STATE_COUNTDOWN
-                        state_start = now
+                        state_start = time.time()
 
             elif event.type == pygame.MOUSEBUTTONUP:
                 power_press_start = None
 
-        screen.fill((0, 0, 0))
+        # Important:
+        # calculate elapsed AFTER processing events/state changes
+        elapsed = time.time() - state_start
+
+        screen.fill(
+            (0, 0, 0)
+        )
 
         if state == STATE_WELCOME:
             screen.blit(
@@ -211,11 +325,23 @@ def main():
             hold_progress = 0
 
             if power_press_start is not None:
-                hold_duration = now - power_press_start
-                hold_progress = hold_duration / POWER_HOLD_SECONDS
+                hold_duration = (
+                    time.time()
+                    - power_press_start
+                )
 
-                if hold_duration >= POWER_HOLD_SECONDS:
-                    screen.fill((0, 0, 0))
+                hold_progress = (
+                    hold_duration
+                    / POWER_HOLD_SECONDS
+                )
+
+                if (
+                    hold_duration
+                    >= POWER_HOLD_SECONDS
+                ):
+                    screen.fill(
+                        (0, 0, 0)
+                    )
 
                     draw_centered_text(
                         screen,
@@ -225,25 +351,33 @@ def main():
                     )
 
                     pygame.display.flip()
+
                     shutdown_pi()
                     running = False
 
             draw_power_button(
                 screen,
-                power_font,
                 hold_progress,
             )
 
         elif state == STATE_COUNTDOWN:
-            frame = picam2.capture_array("main")
-            surface = frame_to_surface(frame)
+            frame = picam2.capture_array(
+                "main"
+            )
+
+            surface = frame_to_surface(
+                frame
+            )
 
             screen.blit(
                 surface,
                 (0, 0),
             )
 
-            remaining = COUNTDOWN_SECONDS - int(elapsed)
+            remaining = (
+                COUNTDOWN_SECONDS
+                - int(elapsed)
+            )
 
             if remaining > 0:
                 draw_centered_text(
@@ -254,19 +388,52 @@ def main():
                 )
 
             else:
-                screen.fill((255, 255, 255))
+                # White flash
+                screen.fill(
+                    (255, 255, 255)
+                )
+
                 pygame.display.flip()
+
                 pygame.time.wait(100)
 
-                last_capture_path = capture_photo(
-                    picam2,
-                    preview_config,
-                    camera_transform,
+                # Capture photo
+                last_capture_path = (
+                    capture_photo(
+                        picam2,
+                        preview_config,
+                        camera_transform,
+                    )
                 )
 
                 print(
-                    f"Captured photo: {last_capture_path}"
+                    "Captured photo: "
+                    f"{last_capture_path}"
                 )
+
+                # Show printing message before blocking print call
+                screen.fill(
+                    (0, 0, 0)
+                )
+
+                draw_centered_text(
+                    screen,
+                    "Printing...",
+                    status_font,
+                    SCREEN_H // 2,
+                )
+
+                pygame.display.flip()
+
+                try:
+                    print_photo(
+                        last_capture_path
+                    )
+
+                except Exception as error:
+                    print(
+                        f"Print error: {error}"
+                    )
 
                 state = STATE_PRINTING
                 state_start = time.time()
@@ -279,7 +446,10 @@ def main():
                 SCREEN_H // 2,
             )
 
-            if elapsed >= PRINTING_MESSAGE_SECONDS:
+            if (
+                elapsed
+                >= PRINTING_MESSAGE_SECONDS
+            ):
                 state = STATE_WELCOME
                 state_start = time.time()
 
